@@ -1,0 +1,9 @@
+include README.md
+include LICENSE
+include requirements.txt
+include requirements-dev.txt
+include pyproject.toml
+include logo.svg
+include kafka-analyzer.spec
+recursive-include kafka_analyzer/reports/templates *.md
+recursive-include tests *.py

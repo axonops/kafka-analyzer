@@ -1,0 +1,65 @@
+# Example configuration for the Kafka AxonOps Analyzer.
+
+# Cluster identification (required)
+cluster:
+  org: "your-organization-name"
+  cluster: "your-cluster-name"
+  cluster_type: "kafka"
+
+# AxonOps API configuration (required)
+axonops:
+  api_url: "https://dash.axonops.cloud/"
+  token: "your-api-token-here"  # Or set AXONOPS_API_TOKEN
+  timeout: 30
+  max_retries: 3
+
+# Analysis configuration (optional - defaults shown)
+analysis:
+  hours: 24
+  metrics_resolution_seconds: 60
+
+  # Disable per-topic partition fetches on huge clusters; the report still
+  # uses cluster-level metrics for under-replicated partitions.
+  collect_per_topic_partitions: true
+
+  enable_sections:
+    infrastructure: true
+    configuration: true
+    operations: true
+    topics: true
+    security: true
+    connect: true
+    schema_registry: true
+
+  thresholds:
+    # Host
+    cpu_usage_warn: 80.0
+    memory_usage_warn: 85.0
+    disk_usage_warn: 80.0
+    log_dir_imbalance_warn: 0.20  # 20% allowed before flagging
+
+    # JVM
+    heap_usage_warn: 75.0
+    gc_pause_warn_ms: 200
+    gc_pause_critical_ms: 1000
+
+    # Cluster health
+    under_replicated_partitions_warn: 0
+    offline_partitions_warn: 0
+    isr_shrink_rate_warn: 0.5
+    request_handler_idle_warn: 0.30
+    network_processor_idle_warn: 0.30
+    request_p99_warn_ms: 500
+    leader_skew_warn: 0.20
+
+    # Topics
+    min_replication_factor: 3
+    min_in_sync_replicas: 2
+    max_partitions_per_broker_warn: 4000
+    max_partitions_per_topic_warn: 200
+    min_partitions_per_topic_warn: 1
+    retention_warn_days: 30
+
+    # Consumer lag
+    consumer_lag_warn: 10000
+    consumer_lag_critical: 100000
