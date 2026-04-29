@@ -14,6 +14,9 @@
 - **Under-replicated partitions:** {{ cluster_state.under_replicated_partition_count() }}
 - **Offline partitions:** {{ cluster_state.offline_partition_count() }}
 - **Recommendations:** {{ total_recommendations }} total — {{ severity_counts.critical }} critical, {{ severity_counts.warning }} warning, {{ severity_counts.info }} info
+{%- if coverage %}
+- **Coverage:** {{ coverage.totals.pass }} pass, {{ coverage.totals.fail }} fail, {{ coverage.totals.skipped }} skipped, {{ coverage.totals.no_data }} no_data (see Coverage Manifest)
+{%- endif %}
 
 {% if top_recommendations %}
 ### Top findings

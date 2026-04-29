@@ -103,6 +103,9 @@ class EnhancedReportGenerator:
                 continue
             sections_md.append(self._render_section(section_name, section_data))
 
+        coverage = self._coverage_summary(analysis_results)
+        sections_md.append(self._render_coverage_appendix(analysis_results, coverage))
+
         template = self.env.get_template("report.md")
         content = template.render(
             cluster_info=cluster_info,
@@ -111,6 +114,7 @@ class EnhancedReportGenerator:
             total_recommendations=len(all_recs),
             top_recommendations=self._top_recommendations(all_recs, limit=10),
             sections_md="\n\n".join(sections_md),
+            coverage=coverage,
             generated_at=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
         )
 
@@ -192,6 +196,72 @@ class EnhancedReportGenerator:
                 out.append(rec)
         return out
 
+    @staticmethod
+    def _coverage_summary(analysis_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Aggregate per-section check totals into a single coverage block.
+
+        Downstream consumers (LLM agents) read this to decide what they
+        still need to query for themselves. A check in `pass` or `fail`
+        state is authoritative; `skipped` and `no_data` mean the agent
+        should treat the area as not yet evaluated.
+        """
+        per_section: Dict[str, Dict[str, int]] = {}
+        totals = {"pass": 0, "fail": 0, "skipped": 0, "no_data": 0}
+        for section_name, section in analysis_results.items():
+            counts = {"pass": 0, "fail": 0, "skipped": 0, "no_data": 0}
+            for check in section.get("checks") or []:
+                status = check.get("status") if isinstance(check, dict) else None
+                if status in counts:
+                    counts[status] += 1
+                    totals[status] += 1
+            per_section[section_name] = counts
+        return {
+            "totals": totals,
+            "by_section": per_section,
+        }
+
+    def _render_coverage_appendix(
+        self, analysis_results: Dict[str, Any], coverage: Dict[str, Any]
+    ) -> str:
+        lines = ["## Coverage Manifest", ""]
+        lines.append(
+            "_What this tool checked, so downstream consumers know what they can trust "
+            "and what they still need to query._"
+        )
+        lines.append("")
+        totals = coverage["totals"]
+        lines.append(
+            f"**Totals:** {totals['pass']} pass, {totals['fail']} fail, "
+            f"{totals['skipped']} skipped, {totals['no_data']} no_data."
+        )
+        lines.append("")
+
+        lines.append("<details><summary>Checks by section</summary>\n")
+        for section_name in SECTION_ORDER:
+            section = analysis_results.get(section_name)
+            if section is None:
+                continue
+            checks = section.get("checks") or []
+            if not checks:
+                continue
+            title = SECTION_TITLES.get(section_name, section_name.title())
+            lines.append(f"### {title}")
+            lines.append("")
+            lines.append("| ID | Status | Description | Source / Reason |")
+            lines.append("| --- | --- | --- | --- |")
+            for check in checks:
+                cid = check.get("id", "")
+                status = check.get("status", "")
+                desc = (check.get("description") or "").replace("|", "\\|")
+                if status in {"skipped", "no_data"}:
+                    last = (check.get("skipped_reason") or "").replace("|", "\\|")
+                else:
+                    last = (check.get("data_source") or "").replace("|", "\\|")
+                lines.append(f"| `{cid}` | {status} | {desc} | {last} |")
+            lines.append("")
+        lines.append("</details>")
+        return "\n".join(lines)
+
     def _top_recommendations(self, recs: List[Any], limit: int = 10) -> List[Dict[str, Any]]:
         order = {"critical": 0, "warning": 1, "info": 2}
         sorted_recs = sorted(
@@ -246,6 +316,8 @@ class EnhancedReportGenerator:
 
     def _generate_json(self, report_data: Dict[str, Any], output_path: Path) -> None:
         cluster_state: ClusterState = report_data["cluster_state"]
+        analysis_results = report_data["analysis_results"]
+        coverage = self._coverage_summary(analysis_results)
         payload = {
             "cluster_info": report_data["cluster_info"],
             "summary": {
@@ -255,6 +327,7 @@ class EnhancedReportGenerator:
                 "under_replicated_partitions": cluster_state.under_replicated_partition_count(),
                 "offline_partitions": cluster_state.offline_partition_count(),
             },
+            "coverage": coverage,
             "analysis_results": {
                 name: {
                     "summary": section.get("summary"),
@@ -263,9 +336,10 @@ class EnhancedReportGenerator:
                         r.dict() if hasattr(r, "dict") else r
                         for r in section.get("recommendations", [])
                     ],
+                    "checks": _json_safe(section.get("checks") or []),
                     "error": section.get("error"),
                 }
-                for name, section in report_data["analysis_results"].items()
+                for name, section in analysis_results.items()
             },
         }
         output_path.write_text(json.dumps(payload, indent=2, default=self._json_default))

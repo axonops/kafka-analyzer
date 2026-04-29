@@ -6,7 +6,7 @@ tolerance, dead-letter-queue setup, and connectors that target topics
 which no longer exist on the Kafka cluster.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ..models import ClusterState, Recommendation
 from .base import BaseAnalyzer
@@ -17,9 +17,14 @@ _PAUSED_STATES = {"PAUSED"}
 _UNASSIGNED_STATES = {"UNASSIGNED", "DESTROYED"}
 _HEALTHY_STATES = {"RUNNING"}
 
+_CONNECT_SOURCE = "GET /clusters/{cluster}/connect/connectors"
+
 
 class ConnectAnalyzer(BaseAnalyzer):
+    category = "connect"
+
     def analyze(self, cluster_state: ClusterState) -> Dict[str, Any]:
+        self._reset_checks()
         recommendations: List[Recommendation] = []
         details: Dict[str, Any] = {}
 
@@ -28,11 +33,25 @@ class ConnectAnalyzer(BaseAnalyzer):
         details["connect_cluster_count"] = self._connect_cluster_count(cluster_state)
 
         if not connectors:
+            for cid, desc in (
+                ("connect.connectors.failed", "No connectors in FAILED state"),
+                ("connect.connectors.failed_tasks", "No connectors with failed tasks"),
+                ("connect.connectors.unassigned", "No unassigned connectors"),
+                ("connect.connectors.paused", "No paused connectors"),
+                ("connect.connectors.dlq_when_tolerance_all", "Connectors with errors.tolerance=all have a DLQ topic"),
+                ("connect.connectors.missing_topics", "Connectors reference topics that exist"),
+                ("connect.connectors.single_task", "Connectors run with more than one task"),
+            ):
+                self._record_check(
+                    cid, desc, _CONNECT_SOURCE,
+                    "skipped", skipped_reason="no connectors deployed",
+                )
             details["recommendation_count"] = 0
             return {
                 "recommendations": [],
                 "summary": {"connector_count": 0, "issues": 0},
                 "details": details,
+                "checks": [c.model_dump() for c in self._checks],
             }
 
         failed: List[str] = []
@@ -75,14 +94,10 @@ class ConnectAnalyzer(BaseAnalyzer):
             if not isinstance(cfg, dict):
                 cfg = {}
 
-            # Error tolerance / DLQ.
             error_tolerance = (cfg.get("errors.tolerance") or "").lower()
             dlq_topic = cfg.get("errors.deadletterqueue.topic.name")
             retries = cfg.get("errors.retry.timeout") or cfg.get("errors.retry.delay.max.ms")
 
-            if error_tolerance not in {"all", "none"}:
-                # Default ("none") is fine; flag only if explicitly something weird.
-                pass
             if error_tolerance == "all" and not dlq_topic:
                 connectors_no_dlq.append(name)
             if not error_tolerance:
@@ -90,7 +105,6 @@ class ConnectAnalyzer(BaseAnalyzer):
             if not retries:
                 connectors_no_retries.append(name)
 
-            # Topics referenced by the connector config.
             referenced = self._connector_topics(cfg)
             if referenced and topic_names:
                 missing = sorted(t for t in referenced if t not in topic_names)
@@ -106,100 +120,188 @@ class ConnectAnalyzer(BaseAnalyzer):
         details["connectors_with_failed_tasks"] = connectors_with_failed_tasks
         details["connectors_targeting_missing_topics"] = connectors_targeting_missing_topics
 
+        # FAILED
         if failed:
-            recommendations.append(
-                self._create_recommendation(
-                    title="Failed Kafka Connect connectors",
-                    description=f"{len(failed)} connector(s) are in FAILED state.",
-                    severity="critical",
-                    category="connect",
-                    impact="Failed connectors are not moving data; downstream systems are stale.",
-                    recommendation="Inspect connector logs and restart once the underlying error is resolved.",
-                    connectors=failed[:25],
-                )
+            rec = self._create_recommendation(
+                check_id="connect.connectors.failed",
+                title="Failed Kafka Connect connectors",
+                description=f"{len(failed)} connector(s) are in FAILED state.",
+                severity="critical",
+                category="connect",
+                impact="Failed connectors are not moving data; downstream systems are stale.",
+                recommendation="Inspect connector logs and restart once the underlying error is resolved.",
+                connectors=failed[:25],
+            )
+            recommendations.append(rec)
+            self._record_check(
+                "connect.connectors.failed",
+                "No connectors in FAILED state",
+                _CONNECT_SOURCE, "fail", recommendation_id=rec.id, count=len(failed),
+            )
+        else:
+            self._record_check(
+                "connect.connectors.failed",
+                "No connectors in FAILED state",
+                _CONNECT_SOURCE, "pass",
             )
 
+        # failed tasks
         if connectors_with_failed_tasks:
-            recommendations.append(
-                self._create_recommendation(
-                    title="Connectors with failed tasks",
-                    description=f"{len(connectors_with_failed_tasks)} connector(s) have at least one task in FAILED state.",
-                    severity="warning",
-                    category="connect",
-                    impact="A failed task means a partition / partition-range is not being processed.",
-                    recommendation="Restart the failed tasks (`POST /connectors/<name>/tasks/<id>/restart`) after diagnosing the cause.",
-                    connectors=connectors_with_failed_tasks[:25],
-                )
+            rec = self._create_recommendation(
+                check_id="connect.connectors.failed_tasks",
+                title="Connectors with failed tasks",
+                description=f"{len(connectors_with_failed_tasks)} connector(s) have at least one task in FAILED state.",
+                severity="warning",
+                category="connect",
+                impact="A failed task means a partition / partition-range is not being processed.",
+                recommendation="Restart the failed tasks (`POST /connectors/<name>/tasks/<id>/restart`) after diagnosing the cause.",
+                connectors=connectors_with_failed_tasks[:25],
+            )
+            recommendations.append(rec)
+            self._record_check(
+                "connect.connectors.failed_tasks",
+                "No connectors with failed tasks",
+                _CONNECT_SOURCE, "fail", recommendation_id=rec.id,
+                count=len(connectors_with_failed_tasks),
+            )
+        else:
+            self._record_check(
+                "connect.connectors.failed_tasks",
+                "No connectors with failed tasks",
+                _CONNECT_SOURCE, "pass",
             )
 
+        # unassigned
         if unassigned:
-            recommendations.append(
-                self._create_recommendation(
-                    title="Unassigned connectors",
-                    description=f"{len(unassigned)} connector(s) are UNASSIGNED.",
-                    severity="warning",
-                    category="connect",
-                    recommendation="Check the Connect worker availability and the connector's last-known config.",
-                    connectors=unassigned[:25],
-                )
+            rec = self._create_recommendation(
+                check_id="connect.connectors.unassigned",
+                title="Unassigned connectors",
+                description=f"{len(unassigned)} connector(s) are UNASSIGNED.",
+                severity="warning",
+                category="connect",
+                recommendation="Check the Connect worker availability and the connector's last-known config.",
+                connectors=unassigned[:25],
+            )
+            recommendations.append(rec)
+            self._record_check(
+                "connect.connectors.unassigned",
+                "No unassigned connectors",
+                _CONNECT_SOURCE, "fail", recommendation_id=rec.id, count=len(unassigned),
+            )
+        else:
+            self._record_check(
+                "connect.connectors.unassigned",
+                "No unassigned connectors",
+                _CONNECT_SOURCE, "pass",
             )
 
+        # paused
         if paused:
-            recommendations.append(
-                self._create_recommendation(
-                    title="Paused connectors",
-                    description=f"{len(paused)} connector(s) are PAUSED.",
-                    severity="info",
-                    category="connect",
-                    recommendation="Confirm the pause is intentional; resume once the maintenance window is over.",
-                    connectors=paused[:25],
-                )
+            rec = self._create_recommendation(
+                check_id="connect.connectors.paused",
+                title="Paused connectors",
+                description=f"{len(paused)} connector(s) are PAUSED.",
+                severity="info",
+                category="connect",
+                recommendation="Confirm the pause is intentional; resume once the maintenance window is over.",
+                connectors=paused[:25],
+            )
+            recommendations.append(rec)
+            self._record_check(
+                "connect.connectors.paused",
+                "No paused connectors",
+                _CONNECT_SOURCE, "fail", recommendation_id=rec.id, count=len(paused),
+            )
+        else:
+            self._record_check(
+                "connect.connectors.paused",
+                "No paused connectors",
+                _CONNECT_SOURCE, "pass",
             )
 
+        # DLQ when tolerance=all
         if connectors_no_dlq:
-            recommendations.append(
-                self._create_recommendation(
-                    title="Connectors with errors.tolerance=all but no DLQ topic",
-                    description=f"{len(connectors_no_dlq)} connector(s) silently drop bad records.",
-                    severity="warning",
-                    category="connect",
-                    impact="Without errors.deadletterqueue.topic.name, malformed records are discarded with no audit trail.",
-                    recommendation="Set errors.deadletterqueue.topic.name (and errors.deadletterqueue.context.headers.enable=true).",
-                    connectors=connectors_no_dlq[:25],
-                )
+            rec = self._create_recommendation(
+                check_id="connect.connectors.dlq_when_tolerance_all",
+                title="Connectors with errors.tolerance=all but no DLQ topic",
+                description=f"{len(connectors_no_dlq)} connector(s) silently drop bad records.",
+                severity="warning",
+                category="connect",
+                impact="Without errors.deadletterqueue.topic.name, malformed records are discarded with no audit trail.",
+                recommendation="Set errors.deadletterqueue.topic.name (and errors.deadletterqueue.context.headers.enable=true).",
+                connectors=connectors_no_dlq[:25],
+            )
+            recommendations.append(rec)
+            self._record_check(
+                "connect.connectors.dlq_when_tolerance_all",
+                "Connectors with errors.tolerance=all have a DLQ topic",
+                _CONNECT_SOURCE, "fail", recommendation_id=rec.id,
+                count=len(connectors_no_dlq),
+            )
+        else:
+            self._record_check(
+                "connect.connectors.dlq_when_tolerance_all",
+                "Connectors with errors.tolerance=all have a DLQ topic",
+                _CONNECT_SOURCE, "pass",
             )
 
+        # missing topics
         if connectors_targeting_missing_topics:
             names = [c["connector"] for c in connectors_targeting_missing_topics]
-            recommendations.append(
-                self._create_recommendation(
-                    title="Connectors reference topics that do not exist",
-                    description=(
-                        f"{len(connectors_targeting_missing_topics)} connector(s) name topics in their "
-                        "config that are not present in the cluster."
-                    ),
-                    severity="warning",
-                    category="connect",
-                    impact=(
-                        "Sink connectors will produce no progress; source connectors may auto-create "
-                        "topics with default RF/partitions, which is usually wrong."
-                    ),
-                    recommendation="Reconcile topic names or pre-create the topics with proper RF and partition counts.",
-                    connectors=names[:25],
-                    detail=connectors_targeting_missing_topics[:10],
-                )
+            rec = self._create_recommendation(
+                check_id="connect.connectors.missing_topics",
+                title="Connectors reference topics that do not exist",
+                description=(
+                    f"{len(connectors_targeting_missing_topics)} connector(s) name topics in their "
+                    "config that are not present in the cluster."
+                ),
+                severity="warning",
+                category="connect",
+                impact=(
+                    "Sink connectors will produce no progress; source connectors may auto-create "
+                    "topics with default RF/partitions, which is usually wrong."
+                ),
+                recommendation="Reconcile topic names or pre-create the topics with proper RF and partition counts.",
+                connectors=names[:25],
+                detail=connectors_targeting_missing_topics[:10],
+            )
+            recommendations.append(rec)
+            self._record_check(
+                "connect.connectors.missing_topics",
+                "Connectors reference topics that exist",
+                _CONNECT_SOURCE, "fail", recommendation_id=rec.id,
+                count=len(connectors_targeting_missing_topics),
+            )
+        else:
+            self._record_check(
+                "connect.connectors.missing_topics",
+                "Connectors reference topics that exist",
+                _CONNECT_SOURCE, "pass",
             )
 
+        # single task
         if single_task_connectors:
-            recommendations.append(
-                self._create_recommendation(
-                    title="Connectors running with a single task",
-                    description=f"{len(single_task_connectors)} connector(s) have tasks.max effectively at 1.",
-                    severity="info",
-                    category="connect",
-                    recommendation="Single-task connectors cap throughput and lose parallelism — verify this matches the workload.",
-                    connectors=single_task_connectors[:25],
-                )
+            rec = self._create_recommendation(
+                check_id="connect.connectors.single_task",
+                title="Connectors running with a single task",
+                description=f"{len(single_task_connectors)} connector(s) have tasks.max effectively at 1.",
+                severity="info",
+                category="connect",
+                recommendation="Single-task connectors cap throughput and lose parallelism — verify this matches the workload.",
+                connectors=single_task_connectors[:25],
+            )
+            recommendations.append(rec)
+            self._record_check(
+                "connect.connectors.single_task",
+                "Connectors run with more than one task",
+                _CONNECT_SOURCE, "fail", recommendation_id=rec.id,
+                count=len(single_task_connectors),
+            )
+        else:
+            self._record_check(
+                "connect.connectors.single_task",
+                "Connectors run with more than one task",
+                _CONNECT_SOURCE, "pass",
             )
 
         details["recommendation_count"] = len(recommendations)
@@ -212,6 +314,7 @@ class ConnectAnalyzer(BaseAnalyzer):
                 "issues": len(recommendations),
             },
             "details": details,
+            "checks": [c.model_dump() for c in self._checks],
         }
 
     @staticmethod
@@ -236,5 +339,4 @@ class ConnectAnalyzer(BaseAnalyzer):
         topics = cfg.get("topics")
         if isinstance(topics, str) and topics:
             out.extend(t.strip() for t in topics.split(",") if t.strip())
-        # Skip topics.regex — we don't try to resolve regex against current topics.
         return out

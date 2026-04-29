@@ -11,6 +11,10 @@ from ..models import ClusterState, Recommendation
 from .base import BaseAnalyzer
 
 
+_BROKER_CFG_SOURCE = "GET /broker/{id} -> configs[]"
+_ACL_SOURCE = "GET /clusters/{cluster}/acls"
+
+
 def _to_bool(value: Optional[str]) -> Optional[bool]:
     if value is None:
         return None
@@ -18,29 +22,61 @@ def _to_bool(value: Optional[str]) -> Optional[bool]:
 
 
 class SecurityAnalyzer(BaseAnalyzer):
+    category = "security"
+
     def analyze(self, cluster_state: ClusterState) -> Dict[str, Any]:
+        self._reset_checks()
         recommendations: List[Recommendation] = []
         details: Dict[str, Any] = {}
 
-        # Authorizer + ACLs.
+        # ---- authorizer + ACLs ------------------------------------------
         authorizer_enabled = cluster_state.is_authorizer_enabled
         details["authorizer_enabled"] = authorizer_enabled
         details["acl_resource_count"] = len(cluster_state.acls or [])
 
-        if authorizer_enabled is False:
-            recommendations.append(
-                self._create_recommendation(
-                    title="Authorizer is disabled",
-                    description="No authorizer is configured on the brokers.",
-                    severity="critical",
-                    category="security",
-                    impact="Any authenticated client (or any client at all on plaintext listeners) can produce, consume, or admin any topic.",
-                    recommendation="Enable the AclAuthorizer (or equivalent) and apply least-privilege ACLs.",
-                )
+        if authorizer_enabled is None:
+            self._record_check(
+                "security.authorizer.enabled",
+                "Authorizer is enabled on the cluster",
+                "GET /clusters/{cluster}/acls (presence implies authorizer)",
+                "no_data",
+                skipped_reason="authorizer state not reported",
             )
-        elif authorizer_enabled is True and not cluster_state.acls:
-            recommendations.append(
-                self._create_recommendation(
+        elif authorizer_enabled is False:
+            rec = self._create_recommendation(
+                check_id="security.authorizer.enabled",
+                title="Authorizer is disabled",
+                description="No authorizer is configured on the brokers.",
+                severity="critical",
+                category="security",
+                impact="Any authenticated client (or any client at all on plaintext listeners) can produce, consume, or admin any topic.",
+                recommendation="Enable the AclAuthorizer (or equivalent) and apply least-privilege ACLs.",
+            )
+            recommendations.append(rec)
+            self._record_check(
+                "security.authorizer.enabled",
+                "Authorizer is enabled on the cluster",
+                "GET /clusters/{cluster}/acls",
+                "fail",
+                recommendation_id=rec.id,
+            )
+            self._record_check(
+                "security.acls.present",
+                "Authorizer-enabled cluster has ACLs configured",
+                _ACL_SOURCE,
+                "skipped",
+                skipped_reason="authorizer is disabled",
+            )
+        else:
+            self._record_check(
+                "security.authorizer.enabled",
+                "Authorizer is enabled on the cluster",
+                "GET /clusters/{cluster}/acls",
+                "pass",
+            )
+            if not cluster_state.acls:
+                rec = self._create_recommendation(
+                    check_id="security.acls.present",
                     title="Authorizer is enabled but no ACLs are configured",
                     description="The cluster has an authorizer but zero ACL resources.",
                     severity="warning",
@@ -48,10 +84,38 @@ class SecurityAnalyzer(BaseAnalyzer):
                     impact="Without ACLs, behaviour depends on allow.everyone.if.no.acl.found.",
                     recommendation="Define explicit ACLs per principal/topic/group.",
                 )
-            )
+                recommendations.append(rec)
+                self._record_check(
+                    "security.acls.present",
+                    "Authorizer-enabled cluster has ACLs configured",
+                    _ACL_SOURCE,
+                    "fail",
+                    recommendation_id=rec.id,
+                )
+            else:
+                self._record_check(
+                    "security.acls.present",
+                    "Authorizer-enabled cluster has ACLs configured",
+                    _ACL_SOURCE,
+                    "pass",
+                )
 
-        # Listener / TLS / SASL config from any broker (settings are usually identical).
-        if cluster_state.brokers:
+        # ---- listener / TLS / SASL config -------------------------------
+        if not cluster_state.brokers:
+            for cid in (
+                "security.listener.plaintext",
+                "security.listener.inter_broker_protocol",
+                "security.sasl.mechanism",
+                "security.sasl.super_users",
+                "security.tls.client_auth",
+                "security.zookeeper.acl",
+                "security.role_consistency.cross_role",
+            ):
+                self._record_check(
+                    cid, "depends on broker config snapshot", _BROKER_CFG_SOURCE,
+                    "no_data", skipped_reason="no brokers in ClusterState",
+                )
+        else:
             sample = next(iter(cluster_state.brokers.values()))
             cfg = sample.configs
 
@@ -75,94 +139,329 @@ class SecurityAnalyzer(BaseAnalyzer):
             details["tls_listener_detected"] = tls_present
 
             if plaintext_present and not tls_present:
-                recommendations.append(
-                    self._create_recommendation(
-                        title="Brokers serve plaintext only",
-                        description="Listener configuration only advertises PLAINTEXT.",
-                        severity="critical",
-                        category="security",
-                        impact="Client traffic and broker-to-broker traffic is unencrypted.",
-                        recommendation="Add an SSL or SASL_SSL listener and migrate clients off plaintext.",
-                    )
+                rec = self._create_recommendation(
+                    check_id="security.listener.plaintext",
+                    title="Brokers serve plaintext only",
+                    description="Listener configuration only advertises PLAINTEXT.",
+                    severity="critical",
+                    category="security",
+                    impact="Client traffic and broker-to-broker traffic is unencrypted.",
+                    recommendation="Add an SSL or SASL_SSL listener and migrate clients off plaintext.",
+                )
+                recommendations.append(rec)
+                self._record_check(
+                    "security.listener.plaintext",
+                    "Brokers expose at least one TLS listener; plaintext is decommissioned",
+                    _BROKER_CFG_SOURCE + " keys=listeners,advertised.listeners",
+                    "fail",
+                    recommendation_id=rec.id,
                 )
             elif plaintext_present and tls_present:
-                recommendations.append(
-                    self._create_recommendation(
-                        title="A plaintext listener is still active",
-                        description="Brokers expose both encrypted and plaintext listeners.",
-                        severity="warning",
-                        category="security",
-                        recommendation="Decommission the plaintext listener once all clients have migrated.",
-                    )
+                rec = self._create_recommendation(
+                    check_id="security.listener.plaintext",
+                    title="A plaintext listener is still active",
+                    description="Brokers expose both encrypted and plaintext listeners.",
+                    severity="warning",
+                    category="security",
+                    recommendation="Decommission the plaintext listener once all clients have migrated.",
+                )
+                recommendations.append(rec)
+                self._record_check(
+                    "security.listener.plaintext",
+                    "Brokers expose at least one TLS listener; plaintext is decommissioned",
+                    _BROKER_CFG_SOURCE + " keys=listeners,advertised.listeners",
+                    "fail",
+                    recommendation_id=rec.id,
+                )
+            else:
+                self._record_check(
+                    "security.listener.plaintext",
+                    "Brokers expose at least one TLS listener; plaintext is decommissioned",
+                    _BROKER_CFG_SOURCE + " keys=listeners,advertised.listeners",
+                    "pass",
                 )
 
-            if inter_broker_protocol and "PLAINTEXT" in inter_broker_protocol:
-                recommendations.append(
-                    self._create_recommendation(
-                        title="Inter-broker traffic is unencrypted",
-                        description=f"security.inter.broker.protocol={inter_broker_protocol}.",
-                        severity="warning",
-                        category="security",
-                        recommendation="Set security.inter.broker.protocol to SSL or SASL_SSL.",
-                    )
+            if inter_broker_protocol is None:
+                self._record_check(
+                    "security.listener.inter_broker_protocol",
+                    "security.inter.broker.protocol uses an encrypted transport",
+                    _BROKER_CFG_SOURCE + " key=security.inter.broker.protocol",
+                    "no_data",
+                    skipped_reason="key not returned",
+                )
+            elif "PLAINTEXT" in inter_broker_protocol:
+                rec = self._create_recommendation(
+                    check_id="security.listener.inter_broker_protocol",
+                    title="Inter-broker traffic is unencrypted",
+                    description=f"security.inter.broker.protocol={inter_broker_protocol}.",
+                    severity="warning",
+                    category="security",
+                    recommendation="Set security.inter.broker.protocol to SSL or SASL_SSL.",
+                )
+                recommendations.append(rec)
+                self._record_check(
+                    "security.listener.inter_broker_protocol",
+                    "security.inter.broker.protocol uses an encrypted transport",
+                    _BROKER_CFG_SOURCE + " key=security.inter.broker.protocol",
+                    "fail",
+                    recommendation_id=rec.id,
+                    value=inter_broker_protocol,
+                )
+            else:
+                self._record_check(
+                    "security.listener.inter_broker_protocol",
+                    "security.inter.broker.protocol uses an encrypted transport",
+                    _BROKER_CFG_SOURCE + " key=security.inter.broker.protocol",
+                    "pass",
+                    value=inter_broker_protocol,
                 )
 
             sasl_mechanism = cfg.get("sasl.enabled.mechanisms")
-            if sasl_mechanism:
+            if sasl_mechanism is None:
+                self._record_check(
+                    "security.sasl.mechanism",
+                    "SASL mechanisms are SCRAM/GSSAPI/OAUTHBEARER (not PLAIN-only)",
+                    _BROKER_CFG_SOURCE + " key=sasl.enabled.mechanisms",
+                    "no_data",
+                    skipped_reason="key not returned",
+                )
+            else:
                 details["sasl.enabled.mechanisms"] = sasl_mechanism
                 if "PLAIN" in sasl_mechanism and "SCRAM" not in sasl_mechanism:
-                    recommendations.append(
-                        self._create_recommendation(
-                            title="SASL/PLAIN is enabled without SCRAM",
-                            description=f"sasl.enabled.mechanisms={sasl_mechanism}.",
-                            severity="warning",
-                            category="security",
-                            impact="SASL/PLAIN sends credentials in cleartext, relying entirely on TLS for confidentiality.",
-                            recommendation="Prefer SASL/SCRAM-SHA-512 (or OAUTHBEARER / GSSAPI) over PLAIN.",
-                        )
+                    rec = self._create_recommendation(
+                        check_id="security.sasl.mechanism",
+                        title="SASL/PLAIN is enabled without SCRAM",
+                        description=f"sasl.enabled.mechanisms={sasl_mechanism}.",
+                        severity="warning",
+                        category="security",
+                        impact="SASL/PLAIN sends credentials in cleartext, relying entirely on TLS for confidentiality.",
+                        recommendation="Prefer SASL/SCRAM-SHA-512 (or OAUTHBEARER / GSSAPI) over PLAIN.",
+                    )
+                    recommendations.append(rec)
+                    self._record_check(
+                        "security.sasl.mechanism",
+                        "SASL mechanisms are SCRAM/GSSAPI/OAUTHBEARER (not PLAIN-only)",
+                        _BROKER_CFG_SOURCE + " key=sasl.enabled.mechanisms",
+                        "fail",
+                        recommendation_id=rec.id,
+                        value=sasl_mechanism,
+                    )
+                else:
+                    self._record_check(
+                        "security.sasl.mechanism",
+                        "SASL mechanisms are SCRAM/GSSAPI/OAUTHBEARER (not PLAIN-only)",
+                        _BROKER_CFG_SOURCE + " key=sasl.enabled.mechanisms",
+                        "pass",
+                        value=sasl_mechanism,
                     )
 
             super_users = cfg.get("super.users", "")
             details["super.users"] = super_users
-            if super_users:
+            if super_users is None:
+                self._record_check(
+                    "security.sasl.super_users",
+                    "super.users list is short and audited",
+                    _BROKER_CFG_SOURCE + " key=super.users",
+                    "no_data",
+                    skipped_reason="key not returned",
+                )
+            elif super_users:
                 count = sum(1 for s in super_users.split(";") if s.strip())
                 if count > 5:
-                    recommendations.append(
-                        self._create_recommendation(
-                            title="Many super.users configured",
-                            description=f"{count} entries in super.users.",
-                            severity="info",
-                            category="security",
-                            recommendation="super.users bypass all ACLs; keep the list short and audited.",
-                        )
-                    )
-
-            ssl_client_auth = cfg.get("ssl.client.auth")
-            if ssl_client_auth and ssl_client_auth.lower() == "none" and tls_present:
-                recommendations.append(
-                    self._create_recommendation(
-                        title="SSL client authentication is disabled",
-                        description="ssl.client.auth=none.",
+                    rec = self._create_recommendation(
+                        check_id="security.sasl.super_users",
+                        title="Many super.users configured",
+                        description=f"{count} entries in super.users.",
                         severity="info",
                         category="security",
-                        recommendation="Set ssl.client.auth=required if you rely on mTLS for client identity.",
+                        recommendation="super.users bypass all ACLs; keep the list short and audited.",
                     )
+                    recommendations.append(rec)
+                    self._record_check(
+                        "security.sasl.super_users",
+                        "super.users list is short and audited",
+                        _BROKER_CFG_SOURCE + " key=super.users",
+                        "fail",
+                        recommendation_id=rec.id,
+                        count=count,
+                    )
+                else:
+                    self._record_check(
+                        "security.sasl.super_users",
+                        "super.users list is short and audited",
+                        _BROKER_CFG_SOURCE + " key=super.users",
+                        "pass",
+                        count=count,
+                    )
+            else:
+                self._record_check(
+                    "security.sasl.super_users",
+                    "super.users list is short and audited",
+                    _BROKER_CFG_SOURCE + " key=super.users",
+                    "pass",
+                    count=0,
+                )
+
+            ssl_client_auth = cfg.get("ssl.client.auth")
+            if ssl_client_auth is None:
+                self._record_check(
+                    "security.tls.client_auth",
+                    "ssl.client.auth=required when TLS is in use",
+                    _BROKER_CFG_SOURCE + " key=ssl.client.auth",
+                    "no_data",
+                    skipped_reason="key not returned",
+                )
+            elif not tls_present:
+                self._record_check(
+                    "security.tls.client_auth",
+                    "ssl.client.auth=required when TLS is in use",
+                    _BROKER_CFG_SOURCE + " key=ssl.client.auth",
+                    "skipped",
+                    skipped_reason="no TLS listener detected",
+                )
+            elif ssl_client_auth.lower() == "none":
+                rec = self._create_recommendation(
+                    check_id="security.tls.client_auth",
+                    title="SSL client authentication is disabled",
+                    description="ssl.client.auth=none.",
+                    severity="info",
+                    category="security",
+                    recommendation="Set ssl.client.auth=required if you rely on mTLS for client identity.",
+                )
+                recommendations.append(rec)
+                self._record_check(
+                    "security.tls.client_auth",
+                    "ssl.client.auth=required when TLS is in use",
+                    _BROKER_CFG_SOURCE + " key=ssl.client.auth",
+                    "fail",
+                    recommendation_id=rec.id,
+                    value=ssl_client_auth,
+                )
+            else:
+                self._record_check(
+                    "security.tls.client_auth",
+                    "ssl.client.auth=required when TLS is in use",
+                    _BROKER_CFG_SOURCE + " key=ssl.client.auth",
+                    "pass",
+                    value=ssl_client_auth,
                 )
 
             zookeeper_secure = _to_bool(cfg.get("zookeeper.set.acl"))
             zk_connect = cfg.get("zookeeper.connect")
-            if zk_connect and zookeeper_secure is False:
-                recommendations.append(
-                    self._create_recommendation(
-                        title="ZooKeeper ACLs are not enabled",
-                        description="zookeeper.set.acl=false.",
-                        severity="warning",
-                        category="security",
-                        recommendation="Enable zookeeper.set.acl=true so Kafka znodes are protected.",
-                    )
+            if not zk_connect:
+                self._record_check(
+                    "security.zookeeper.acl",
+                    "zookeeper.set.acl=true on ZK-mode clusters",
+                    _BROKER_CFG_SOURCE + " key=zookeeper.set.acl",
+                    "skipped",
+                    skipped_reason="cluster is KRaft (no ZooKeeper)",
+                )
+            elif zookeeper_secure is None:
+                self._record_check(
+                    "security.zookeeper.acl",
+                    "zookeeper.set.acl=true on ZK-mode clusters",
+                    _BROKER_CFG_SOURCE + " key=zookeeper.set.acl",
+                    "no_data",
+                    skipped_reason="key not returned",
+                )
+            elif zookeeper_secure is False:
+                rec = self._create_recommendation(
+                    check_id="security.zookeeper.acl",
+                    title="ZooKeeper ACLs are not enabled",
+                    description="zookeeper.set.acl=false.",
+                    severity="warning",
+                    category="security",
+                    recommendation="Enable zookeeper.set.acl=true so Kafka znodes are protected.",
+                )
+                recommendations.append(rec)
+                self._record_check(
+                    "security.zookeeper.acl",
+                    "zookeeper.set.acl=true on ZK-mode clusters",
+                    _BROKER_CFG_SOURCE + " key=zookeeper.set.acl",
+                    "fail",
+                    recommendation_id=rec.id,
+                )
+            else:
+                self._record_check(
+                    "security.zookeeper.acl",
+                    "zookeeper.set.acl=true on ZK-mode clusters",
+                    _BROKER_CFG_SOURCE + " key=zookeeper.set.acl",
+                    "pass",
                 )
 
-        # Public/wildcard ACL detection + orphan topic ACLs.
+            # KRaft role-consistency comparison.
+            controllers = [b for b in cluster_state.brokers.values() if b.is_controller]
+            data_brokers = [b for b in cluster_state.brokers.values() if not b.is_controller]
+            if not controllers or not data_brokers:
+                self._record_check(
+                    "security.role_consistency.cross_role",
+                    "Security-relevant configs match across controllers and brokers (KRaft)",
+                    _BROKER_CFG_SOURCE,
+                    "skipped",
+                    skipped_reason=(
+                        "ZooKeeper-mode cluster, or controllers/brokers are not separated as KRaft roles"
+                    ),
+                )
+            else:
+                role_compare_keys = (
+                    "sasl.mechanism.inter.broker.protocol",
+                    "security.inter.broker.protocol",
+                    "sasl.enabled.mechanisms",
+                    "listener.security.protocol.map",
+                )
+                divergent: List[str] = []
+                for key in role_compare_keys:
+                    ctrl_vals = {b.configs.get(key) for b in controllers if b.configs.get(key) is not None}
+                    brk_vals = {b.configs.get(key) for b in data_brokers if b.configs.get(key) is not None}
+                    if not ctrl_vals or not brk_vals or ctrl_vals == brk_vals:
+                        continue
+                    divergent.append(key)
+                    ctrl_repr = ", ".join(sorted(str(v) for v in ctrl_vals))
+                    brk_repr = ", ".join(sorted(str(v) for v in brk_vals))
+                    if key == "listener.security.protocol.map":
+                        title = "listener.security.protocol.map differs between controllers and brokers"
+                        impact = (
+                            "Divergent listener maps make it easy to introduce silent "
+                            "misconfiguration when adding listeners or rotating security policies."
+                        )
+                        rec_text = (
+                            "Reconcile listener.security.protocol.map so controllers and brokers "
+                            "share a single, intentional set of listener-to-protocol mappings."
+                        )
+                    else:
+                        title = f"{key} differs between controllers and brokers"
+                        impact = (
+                            "Inconsistent inter-role security settings cause authentication or "
+                            "encryption mismatches during failover and inter-process traffic."
+                        )
+                        rec_text = f"Set {key} to the same value on all controllers and brokers."
+                    rec = self._create_recommendation(
+                        check_id=f"security.role_consistency.{key.replace('.', '_')}",
+                        title=title,
+                        description=f"controllers: {ctrl_repr}; brokers: {brk_repr}.",
+                        severity="warning",
+                        category="security",
+                        impact=impact,
+                        recommendation=rec_text,
+                    )
+                    recommendations.append(rec)
+                if divergent:
+                    self._record_check(
+                        "security.role_consistency.cross_role",
+                        "Security-relevant configs match across controllers and brokers (KRaft)",
+                        _BROKER_CFG_SOURCE,
+                        "fail",
+                        divergent_keys=divergent,
+                    )
+                else:
+                    self._record_check(
+                        "security.role_consistency.cross_role",
+                        "Security-relevant configs match across controllers and brokers (KRaft)",
+                        _BROKER_CFG_SOURCE,
+                        "pass",
+                    )
+
+        # ---- ACL details (wildcard / orphan) ----------------------------
         wildcard_principals = 0
         orphan_topic_acls: List[str] = []
         topic_names = set(cluster_state.topics.keys())
@@ -175,9 +474,6 @@ class SecurityAnalyzer(BaseAnalyzer):
                 if principal in {"User:*", "*"}:
                     wildcard_principals += 1
 
-            # Orphan topic ACL: a TOPIC-resource ACL whose name does not
-            # match any current topic. Skip the cluster-wildcard "*", which
-            # is by definition not orphan.
             resource_type = (resource.get("resourceType") or "").upper()
             resource_name = resource.get("resourceName") or ""
             pattern_type = (resource.get("resourcePatternType") or "LITERAL").upper()
@@ -185,7 +481,7 @@ class SecurityAnalyzer(BaseAnalyzer):
                 matched = False
                 if pattern_type == "PREFIXED":
                     matched = any(name.startswith(resource_name) for name in topic_names)
-                else:  # LITERAL (default) and any other unknown pattern
+                else:
                     matched = resource_name in topic_names
                 if not matched:
                     orphan_topic_acls.append(resource_name)
@@ -195,20 +491,50 @@ class SecurityAnalyzer(BaseAnalyzer):
         if orphan_topic_acls:
             details["orphan_topic_acls"] = orphan_topic_acls
 
-        if wildcard_principals > 0:
-            recommendations.append(
-                self._create_recommendation(
+        if not cluster_state.acls:
+            self._record_check(
+                "security.acls.wildcard_principal",
+                "ACLs do not grant access to wildcard principals (User:*)",
+                _ACL_SOURCE,
+                "skipped",
+                skipped_reason="no ACLs to evaluate",
+            )
+            self._record_check(
+                "security.acls.orphan_topic",
+                "Topic ACLs reference existing topics",
+                _ACL_SOURCE,
+                "skipped",
+                skipped_reason="no ACLs to evaluate",
+            )
+        else:
+            if wildcard_principals > 0:
+                rec = self._create_recommendation(
+                    check_id="security.acls.wildcard_principal",
                     title="Wildcard ACL principals detected",
                     description=f"{wildcard_principals} ACL entries grant access to User:* (any authenticated user).",
                     severity="warning",
                     category="security",
                     recommendation="Replace wildcard principals with named ones following least privilege.",
                 )
-            )
-
-        if orphan_topic_acls:
-            recommendations.append(
-                self._create_recommendation(
+                recommendations.append(rec)
+                self._record_check(
+                    "security.acls.wildcard_principal",
+                    "ACLs do not grant access to wildcard principals (User:*)",
+                    _ACL_SOURCE,
+                    "fail",
+                    recommendation_id=rec.id,
+                    count=wildcard_principals,
+                )
+            else:
+                self._record_check(
+                    "security.acls.wildcard_principal",
+                    "ACLs do not grant access to wildcard principals (User:*)",
+                    _ACL_SOURCE,
+                    "pass",
+                )
+            if orphan_topic_acls:
+                rec = self._create_recommendation(
+                    check_id="security.acls.orphan_topic",
                     title="Orphan ACLs reference topics that no longer exist",
                     description=(
                         f"{len(orphan_topic_acls)} ACL resource(s) target topics that are not "
@@ -228,7 +554,22 @@ class SecurityAnalyzer(BaseAnalyzer):
                     ),
                     orphan_topics=orphan_topic_acls[:25],
                 )
-            )
+                recommendations.append(rec)
+                self._record_check(
+                    "security.acls.orphan_topic",
+                    "Topic ACLs reference existing topics",
+                    _ACL_SOURCE,
+                    "fail",
+                    recommendation_id=rec.id,
+                    orphan_count=len(orphan_topic_acls),
+                )
+            else:
+                self._record_check(
+                    "security.acls.orphan_topic",
+                    "Topic ACLs reference existing topics",
+                    _ACL_SOURCE,
+                    "pass",
+                )
 
         details["recommendation_count"] = len(recommendations)
         return {
@@ -239,4 +580,5 @@ class SecurityAnalyzer(BaseAnalyzer):
                 "issues": len(recommendations),
             },
             "details": details,
+            "checks": [c.model_dump() for c in self._checks],
         }

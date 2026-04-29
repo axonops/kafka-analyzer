@@ -10,10 +10,12 @@ from .cluster import (
     Topic,
 )
 from .metrics import MetricData, MetricPoint
-from .recommendations import Recommendation, Severity
+from .recommendations import Check, CheckStatus, Recommendation, Severity
 
 __all__ = [
     "Broker",
+    "Check",
+    "CheckStatus",
     "ClusterState",
     "ConsumerGroup",
     "Partition",
