@@ -76,7 +76,7 @@ class KafkaAnalyzer:
 
         self.report_generator = EnhancedReportGenerator(output_dir)
 
-    def analyze(self, generate_pdf: bool = False) -> Path:
+    def analyze(self, generate_pdf: bool = False, for_agent: bool = False) -> Path:
         logger.info(
             "Starting analysis",
             org=self.org,
@@ -92,7 +92,7 @@ class KafkaAnalyzer:
         analysis_results = self._run_analyzers(cluster_state)
 
         logger.info("Generating report")
-        report_path = self._generate_report(cluster_state, analysis_results, generate_pdf)
+        report_path = self._generate_report(cluster_state, analysis_results, generate_pdf, for_agent)
 
         logger.info("Analysis complete", report_path=str(report_path))
         return report_path
@@ -127,6 +127,7 @@ class KafkaAnalyzer:
         cluster_state: ClusterState,
         analysis_results: Dict[str, Any],
         generate_pdf: bool = False,
+        for_agent: bool = False,
     ) -> Path:
         report_data = {
             "cluster_info": {
@@ -142,4 +143,4 @@ class KafkaAnalyzer:
             "cluster_state": cluster_state,
             "analysis_results": analysis_results,
         }
-        return self.report_generator.generate(report_data, generate_pdf=generate_pdf)
+        return self.report_generator.generate(report_data, generate_pdf=generate_pdf, for_agent=for_agent)

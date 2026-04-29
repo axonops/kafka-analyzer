@@ -59,12 +59,17 @@ class EnhancedReportGenerator:
         self.env.filters["severity_text"] = self._severity_text
         self.env.filters["format_number"] = self._format_number
 
-    def generate(self, report_data: Dict[str, Any], generate_pdf: bool = False) -> Path:
+    def generate(
+        self,
+        report_data: Dict[str, Any],
+        generate_pdf: bool = False,
+        for_agent: bool = False,
+    ) -> Path:
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         cluster_name = report_data["cluster_info"]["cluster_name"]
 
         md_path = self.output_dir / f"kafka_analysis_{cluster_name}_{timestamp}.md"
-        self._generate_markdown(report_data, md_path)
+        self._generate_markdown(report_data, md_path, for_agent=for_agent)
 
         json_path = self.output_dir / f"kafka_analysis_{cluster_name}_{timestamp}.json"
         self._generate_json(report_data, json_path)
@@ -87,7 +92,12 @@ class EnhancedReportGenerator:
 
     # --------------------------------------------------------------- markdown
 
-    def _generate_markdown(self, report_data: Dict[str, Any], output_path: Path) -> None:
+    def _generate_markdown(
+        self,
+        report_data: Dict[str, Any],
+        output_path: Path,
+        for_agent: bool = False,
+    ) -> None:
         cluster_state: ClusterState = report_data["cluster_state"]
         analysis_results: Dict[str, Any] = report_data["analysis_results"]
         cluster_info = report_data["cluster_info"]
@@ -101,10 +111,15 @@ class EnhancedReportGenerator:
             section_data = analysis_results.get(section_name)
             if section_data is None:
                 continue
-            sections_md.append(self._render_section(section_name, section_data))
+            sections_md.append(
+                self._render_section(section_name, section_data, for_agent=for_agent)
+            )
 
         coverage = self._coverage_summary(analysis_results)
-        sections_md.append(self._render_coverage_appendix(analysis_results, coverage))
+        # The coverage manifest is only useful to consumers that understand
+        # the contract — keep it out of plain human reports.
+        if for_agent:
+            sections_md.append(self._render_coverage_appendix(analysis_results, coverage))
 
         template = self.env.get_template("report.md")
         content = template.render(
@@ -115,13 +130,16 @@ class EnhancedReportGenerator:
             top_recommendations=self._top_recommendations(all_recs, limit=10),
             sections_md="\n\n".join(sections_md),
             coverage=coverage,
+            for_agent=for_agent,
             generated_at=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
         )
 
         output_path.write_text(content)
         logger.info("Markdown report generated", path=str(output_path))
 
-    def _render_section(self, name: str, data: Dict[str, Any]) -> str:
+    def _render_section(
+        self, name: str, data: Dict[str, Any], for_agent: bool = False
+    ) -> str:
         title = SECTION_TITLES.get(name, name.title())
 
         if data.get("error"):
@@ -150,7 +168,9 @@ class EnhancedReportGenerator:
         else:
             lines.append("_No issues found in this section._")
 
-        if details:
+        # Detailed-metrics dumps are noisy and only useful to a consumer that
+        # understands the contract — keep them out of plain human reports.
+        if details and for_agent:
             lines.append("\n<details><summary>Detailed metrics</summary>\n")
             lines.append("```json")
             try:

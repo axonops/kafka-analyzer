@@ -4,7 +4,32 @@
 **Cluster type:** {{ cluster_info.cluster_type }}
 **Analysis window:** {{ cluster_info.time_range.start }} → {{ cluster_info.time_range.end }}
 **Generated:** {{ generated_at }}
+{% if for_agent %}
+## How to read this report
 
+This report is the contract between kafka-analyzer and any downstream consumer
+(human reviewer or LLM agent). Interpret it as follows:
+
+- **Findings** under each section are issues the tool detected. Severity
+  (CRITICAL / WARNING / INFO) is authoritative — use it verbatim. Each finding
+  has a stable `id` matching an entry in the Coverage Manifest.
+- **Coverage Manifest** (appendix) lists every check the tool considered, in
+  one of four states:
+  - `pass` — check ran cleanly, the cluster meets expectations on this point.
+    Do NOT re-query or re-investigate.
+  - `fail` — check ran and produced a finding above. Cross-reference by `id`.
+    Do NOT re-derive.
+  - `skipped` — a precondition was not met (e.g. ZK-mode cluster, fewer than
+    3 brokers). The check does not apply. Do not surface as an issue.
+  - `no_data` — the tool would have run this check but the required data
+    source returned nothing. **This area is not yet evaluated.** If it is in
+    scope for your output, query the source listed in the manifest yourself.
+- **Detailed metrics** blocks under each section contain the raw observed
+  values that backed the findings.
+- The richer machine-readable JSON sibling of this file (same basename, `.json`)
+  carries the same content with full per-check `data_source` strings and
+  `recommendation_id` cross-references.
+{% endif %}
 ## Executive Summary
 
 - **Brokers:** {{ cluster_state.get_total_brokers() }} ({{ cluster_state.get_active_brokers() }} active)
@@ -14,7 +39,7 @@
 - **Under-replicated partitions:** {{ cluster_state.under_replicated_partition_count() }}
 - **Offline partitions:** {{ cluster_state.offline_partition_count() }}
 - **Recommendations:** {{ total_recommendations }} total — {{ severity_counts.critical }} critical, {{ severity_counts.warning }} warning, {{ severity_counts.info }} info
-{%- if coverage %}
+{%- if for_agent and coverage %}
 - **Coverage:** {{ coverage.totals.pass }} pass, {{ coverage.totals.fail }} fail, {{ coverage.totals.skipped }} skipped, {{ coverage.totals.no_data }} no_data (see Coverage Manifest)
 {%- endif %}
 
