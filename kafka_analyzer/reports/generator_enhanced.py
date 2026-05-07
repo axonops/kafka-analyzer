@@ -150,7 +150,6 @@ class EnhancedReportGenerator:
 
         recs = data.get("recommendations") or []
         summary = data.get("summary") or {}
-        details = data.get("details") or {}
 
         lines = [f"## {title}", ""]
 
@@ -164,29 +163,25 @@ class EnhancedReportGenerator:
             lines.append("### Findings")
             for rec in recs:
                 rec_dict = rec.dict() if hasattr(rec, "dict") else dict(rec)
-                lines.append(self._render_recommendation(rec_dict))
+                lines.append(self._render_recommendation(rec_dict, for_agent=for_agent))
         else:
             lines.append("_No issues found in this section._")
 
-        # Detailed-metrics dumps are noisy and only useful to a consumer that
-        # understands the contract — keep them out of plain human reports.
-        if details and for_agent:
-            lines.append("\n<details><summary>Detailed metrics</summary>\n")
-            lines.append("```json")
-            try:
-                lines.append(json.dumps(details, indent=2, default=self._json_default))
-            except TypeError:
-                lines.append(str(details))
-            lines.append("```")
-            lines.append("\n</details>")
+        # Raw `details` are not rendered in markdown — the JSON sibling carries
+        # them, and inline JSON dumps explode token budgets for agents.
 
         return "\n".join(lines)
 
-    def _render_recommendation(self, rec: Dict[str, Any]) -> str:
+    def _render_recommendation(
+        self, rec: Dict[str, Any], for_agent: bool = False
+    ) -> str:
         severity = (rec.get("severity") or "info").upper()
         title = rec.get("title", "Recommendation")
         out = [f"\n#### {self._severity_icon(severity)} {title}", ""]
-        out.append(f"**Severity:** {severity}  ")
+        # The icon already encodes severity; agents can read it from the icon
+        # and save tokens. Humans still get the explicit label.
+        if not for_agent:
+            out.append(f"**Severity:** {severity}  ")
         if rec.get("current_value"):
             out.append(f"**Current value:** {rec['current_value']}  ")
         out.append("")
@@ -245,8 +240,10 @@ class EnhancedReportGenerator:
     ) -> str:
         lines = ["## Coverage Manifest", ""]
         lines.append(
-            "_What this tool checked, so downstream consumers know what they can trust "
-            "and what they still need to query._"
+            "_Every check the tool considered, by `id`. `fail` and `no_data` rows "
+            "are listed in full — they need attention. `pass` and `skipped` IDs are "
+            "listed compactly per section as evidence the area was evaluated; do not "
+            "re-derive them. The `.json` sibling has full per-check fields._"
         )
         lines.append("")
         totals = coverage["totals"]
@@ -256,30 +253,72 @@ class EnhancedReportGenerator:
         )
         lines.append("")
 
-        lines.append("<details><summary>Checks by section</summary>\n")
+        # Layer A: a single combined table of fail + no_data rows across all
+        # sections — these are what the consumer must read and act on.
+        actionable_rows: List[str] = []
         for section_name in SECTION_ORDER:
             section = analysis_results.get(section_name)
             if section is None:
                 continue
             checks = section.get("checks") or []
-            if not checks:
-                continue
-            title = SECTION_TITLES.get(section_name, section_name.title())
-            lines.append(f"### {title}")
-            lines.append("")
-            lines.append("| ID | Status | Description | Source / Reason |")
-            lines.append("| --- | --- | --- | --- |")
+            section_title = SECTION_TITLES.get(section_name, section_name.title())
             for check in checks:
-                cid = check.get("id", "")
                 status = check.get("status", "")
+                if status not in {"fail", "no_data"}:
+                    continue
+                cid = check.get("id", "")
                 desc = (check.get("description") or "").replace("|", "\\|")
-                if status in {"skipped", "no_data"}:
-                    last = (check.get("skipped_reason") or "").replace("|", "\\|")
+                if status == "no_data":
+                    reason = (check.get("skipped_reason") or "").replace("|", "\\|")
                 else:
-                    last = (check.get("data_source") or "").replace("|", "\\|")
-                lines.append(f"| `{cid}` | {status} | {desc} | {last} |")
+                    reason = (check.get("data_source") or "").replace("|", "\\|")
+                actionable_rows.append(
+                    f"| {section_title} | `{cid}` | {status} | {desc} | {reason} |"
+                )
+
+        if actionable_rows:
+            lines.append("### Action required (`fail` / `no_data`)")
             lines.append("")
-        lines.append("</details>")
+            lines.append("| Section | ID | Status | Description | Reason / Source |")
+            lines.append("| --- | --- | --- | --- | --- |")
+            lines.extend(actionable_rows)
+            lines.append("")
+        else:
+            lines.append("_No `fail` or `no_data` checks._")
+            lines.append("")
+
+        # Layer B: compact per-section evidence lists for pass / skipped, so
+        # the agent sees that these IDs were evaluated without paying for a
+        # full table row each.
+        lines.append("### Evidence (`pass` / `skipped` IDs)")
+        lines.append("")
+        for section_name in SECTION_ORDER:
+            section = analysis_results.get(section_name)
+            if section is None:
+                continue
+            checks = section.get("checks") or []
+            passed = [c.get("id", "") for c in checks if c.get("status") == "pass"]
+            skipped_by_reason: Dict[str, List[str]] = {}
+            for c in checks:
+                if c.get("status") != "skipped":
+                    continue
+                reason = c.get("skipped_reason") or "no reason given"
+                skipped_by_reason.setdefault(reason, []).append(c.get("id", ""))
+            if not passed and not skipped_by_reason:
+                continue
+            section_title = SECTION_TITLES.get(section_name, section_name.title())
+            lines.append(f"**{section_title}**")
+            if passed:
+                lines.append(
+                    "- _Passed:_ "
+                    + ", ".join(f"`{cid}`" for cid in passed)
+                )
+            for reason, ids in skipped_by_reason.items():
+                lines.append(
+                    f"- _Skipped ({reason}):_ "
+                    + ", ".join(f"`{cid}`" for cid in ids)
+                )
+            lines.append("")
         return "\n".join(lines)
 
     def _top_recommendations(self, recs: List[Any], limit: int = 10) -> List[Dict[str, Any]]:

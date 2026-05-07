@@ -7,28 +7,14 @@
 {% if for_agent %}
 ## How to read this report
 
-This report is the contract between kafka-analyzer and any downstream consumer
-(human reviewer or LLM agent). Interpret it as follows:
-
-- **Findings** under each section are issues the tool detected. Severity
-  (CRITICAL / WARNING / INFO) is authoritative — use it verbatim. Each finding
-  has a stable `id` matching an entry in the Coverage Manifest.
-- **Coverage Manifest** (appendix) lists every check the tool considered, in
-  one of four states:
-  - `pass` — check ran cleanly, the cluster meets expectations on this point.
-    Do NOT re-query or re-investigate.
-  - `fail` — check ran and produced a finding above. Cross-reference by `id`.
-    Do NOT re-derive.
-  - `skipped` — a precondition was not met (e.g. ZK-mode cluster, fewer than
-    3 brokers). The check does not apply. Do not surface as an issue.
-  - `no_data` — the tool would have run this check but the required data
-    source returned nothing. **This area is not yet evaluated.** If it is in
-    scope for your output, query the source listed in the manifest yourself.
-- **Detailed metrics** blocks under each section contain the raw observed
-  values that backed the findings.
-- The richer machine-readable JSON sibling of this file (same basename, `.json`)
-  carries the same content with full per-check `data_source` strings and
-  `recommendation_id` cross-references.
+This report is the contract between kafka-analyzer and downstream consumers.
+- **Findings** are authoritative; severity (CRITICAL/WARNING/INFO) and `id` are stable.
+- **Coverage Manifest** lists every check by `id` in one of four states:
+  - `pass` — cluster meets expectations; do NOT re-query.
+  - `fail` — produced a finding above; cross-reference by `id`.
+  - `skipped` — precondition not met; do NOT surface as an issue.
+  - `no_data` — required source returned nothing; **not yet evaluated** — query the source yourself if in scope.
+- The `.json` sibling carries raw `details` and full per-check `data_source` strings.
 {% endif %}
 ## Executive Summary
 
@@ -46,7 +32,7 @@ This report is the contract between kafka-analyzer and any downstream consumer
 {% if top_recommendations %}
 ### Top findings
 {% for rec in top_recommendations %}
-- {{ rec.severity | severity_icon }} **{{ rec.title }}** ({{ rec.category }}){% if rec.current_value %} — {{ rec.current_value }}{% endif %}
+- {{ rec.severity | severity_icon }} **{{ rec.title }}**{% if not for_agent %} ({{ rec.category }}){% endif %}{% if rec.current_value %} — {{ rec.current_value }}{% endif %}
 {% endfor %}
 {% endif %}
 
