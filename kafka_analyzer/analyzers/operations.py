@@ -14,6 +14,10 @@ from .base import BaseAnalyzer
 
 class OperationsAnalyzer(BaseAnalyzer):
     category = "operations"
+    # URP/offline-partition/controller-stability/ISR-churn findings are
+    # reliability concerns. Latency, request-handler saturation, and skew
+    # findings override per call to performance.
+    default_recommendation_category = "reliability"
 
     def analyze(self, cluster_state: ClusterState) -> Dict[str, Any]:
         self._reset_checks()

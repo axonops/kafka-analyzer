@@ -32,6 +32,7 @@ class ConfigurationAnalyzer(BaseAnalyzer):
     """Inspects broker server.properties values and JVM arguments."""
 
     category = "configuration"
+    default_recommendation_category = "configuration"
 
     def analyze(self, cluster_state: ClusterState) -> Dict[str, Any]:
         self._reset_checks()

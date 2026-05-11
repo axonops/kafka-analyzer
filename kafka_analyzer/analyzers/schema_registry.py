@@ -26,6 +26,9 @@ def _subject_to_topic(subject: str) -> Optional[str]:
 
 class SchemaRegistryAnalyzer(BaseAnalyzer):
     category = "schema_registry"
+    # Compatibility / orphan-subjects / topic-coverage are configuration
+    # discipline concerns.
+    default_recommendation_category = "configuration"
 
     def analyze(self, cluster_state: ClusterState) -> Dict[str, Any]:
         self._reset_checks()

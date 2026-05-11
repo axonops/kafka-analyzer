@@ -13,6 +13,10 @@ from .base import BaseAnalyzer
 
 class InfrastructureAnalyzer(BaseAnalyzer):
     category = "infrastructure"
+    # Broker count / rack distribution / cluster topology findings are
+    # reliability concerns. CPU/memory/disk/log-dir balance findings override
+    # per call to performance or capacity.
+    default_recommendation_category = "reliability"
 
     def analyze(self, cluster_state: ClusterState) -> Dict[str, Any]:
         self._reset_checks()
