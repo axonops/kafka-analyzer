@@ -15,6 +15,11 @@ _TOPIC_SOURCE = "GET /clusters/{cluster}/topics + per-topic configs"
 
 class TopicsAnalyzer(BaseAnalyzer):
     category = "topics"
+    # Replication / ISR / consumer-lag findings are reliability. Partition-
+    # count / single-partition-throughput findings override per call to
+    # performance. Retention findings override to capacity. Schema coverage
+    # overrides to configuration.
+    default_recommendation_category = "reliability"
 
     def analyze(self, cluster_state: ClusterState) -> Dict[str, Any]:
         self._reset_checks()

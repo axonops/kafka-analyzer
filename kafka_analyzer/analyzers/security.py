@@ -23,6 +23,7 @@ def _to_bool(value: Optional[str]) -> Optional[bool]:
 
 class SecurityAnalyzer(BaseAnalyzer):
     category = "security"
+    default_recommendation_category = "security"
 
     def analyze(self, cluster_state: ClusterState) -> Dict[str, Any]:
         self._reset_checks()

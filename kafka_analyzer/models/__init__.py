@@ -10,9 +10,17 @@ from .cluster import (
     Topic,
 )
 from .metrics import MetricData, MetricPoint
-from .recommendations import Check, CheckStatus, Recommendation, Severity
+from .recommendations import (
+    AffectedResources,
+    Check,
+    CheckStatus,
+    Recommendation,
+    RecommendationCategory,
+    Severity,
+)
 
 __all__ = [
+    "AffectedResources",
     "Broker",
     "Check",
     "CheckStatus",
@@ -23,5 +31,6 @@ __all__ = [
     "MetricData",
     "MetricPoint",
     "Recommendation",
+    "RecommendationCategory",
     "Severity",
 ]

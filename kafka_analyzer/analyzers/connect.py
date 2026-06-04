@@ -22,6 +22,10 @@ _CONNECT_SOURCE = "GET /clusters/{cluster}/connect/connectors"
 
 class ConnectAnalyzer(BaseAnalyzer):
     category = "connect"
+    # Connector health (failed tasks, missing topics, paused state) is mostly
+    # a reliability concern. Single-task / DLQ-tolerance findings override per
+    # call to performance/configuration.
+    default_recommendation_category = "reliability"
 
     def analyze(self, cluster_state: ClusterState) -> Dict[str, Any]:
         self._reset_checks()
