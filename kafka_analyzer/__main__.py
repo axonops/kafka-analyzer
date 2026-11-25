@@ -74,6 +74,10 @@ def main(config, output_dir, verbose, curl, pdf, stdout_format):
         env_token = os.getenv("AXONOPS_API_TOKEN")
         if env_token:
             config_data.setdefault("axonops", {})["token"] = env_token
+    if not config_data.get("axonops", {}).get("token_type"):
+        env_type = os.getenv("AXONOPS_API_TOKEN_TYPE")
+        if env_type:
+            config_data.setdefault("axonops", {})["token_type"] = env_type
 
     if "cluster" not in config_data:
         raise click.ClickException("'cluster' section is required in config file")
@@ -107,6 +111,7 @@ def main(config, output_dir, verbose, curl, pdf, stdout_format):
         timeout=analyzer_config.axonops.timeout,
         max_retries=analyzer_config.axonops.max_retries,
         log_curl=curl,
+        token_type=analyzer_config.axonops.token_type,
     )
 
     analyzer = KafkaAnalyzer(

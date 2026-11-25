@@ -31,9 +31,12 @@ class AxonOpsClient:
         timeout: int = 30,
         max_retries: int = 3,
         log_curl: bool = False,
+        token_type: str = "Bearer",
     ):
         self.api_url = api_url.rstrip("/")
         self.token = token
+        # "Bearer" for JWTs; "AxonApi" for axon-server API keys (auth-enabled on-prem installs)
+        self.token_type = token_type
         self.timeout = timeout
         self.log_curl = log_curl
 
@@ -48,7 +51,7 @@ class AxonOpsClient:
         self.session.mount("https://", adapter)
 
         self.session.headers.update({
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"{token_type} {token}",
             "Content-Type": "application/json",
             "User-Agent": "kafka-analyzer/1.0.0",
         })
@@ -140,7 +143,7 @@ class AxonOpsClient:
             url_with_qs = url
 
         parts = [f"curl -X {method} '{url_with_qs}'"]
-        parts.append("  -H 'Authorization: Bearer <REDACTED>'")
+        parts.append(f"  -H 'Authorization: {self.token_type} <REDACTED>'")
         parts.append("  -H 'Content-Type: application/json'")
         for k, v in extra_headers.items():
             if k == "Authorization":

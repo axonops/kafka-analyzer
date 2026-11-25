@@ -10,6 +10,7 @@ cluster:
 axonops:
   api_url: "https://dash.axonops.cloud/"
   token: "your-api-token-here"  # Or set AXONOPS_API_TOKEN
+  token_type: "Bearer"          # "AxonApi" for an axon-server API key (auth enabled); or AXONOPS_API_TOKEN_TYPE
   timeout: 30
   max_retries: 3
 

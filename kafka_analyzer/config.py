@@ -2,7 +2,7 @@
 Configuration models and defaults for the Kafka analyzer.
 """
 
-from typing import Dict
+from typing import Dict, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -17,6 +17,13 @@ class AxonOpsConfig(BaseModel):
     """AxonOps API configuration."""
     api_url: str = Field(default="http://localhost:9090", description="AxonOps API URL")
     token: str = Field(description="API authentication token")
+    token_type: Literal["Bearer", "AxonApi"] = Field(
+        default="Bearer",
+        description=(
+            "Authorization scheme for the token: 'Bearer' for a JWT (AxonOps Cloud / SSO sessions), "
+            "'AxonApi' for an API key created in axon-server when authentication is enabled"
+        ),
+    )
     timeout: int = Field(default=30, description="API request timeout in seconds")
     max_retries: int = Field(default=3, description="Maximum number of API retry attempts")
 

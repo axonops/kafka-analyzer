@@ -28,6 +28,21 @@ def test_client_sets_auth_header(client):
     assert client.session.headers["Authorization"] == "Bearer test-token"
 
 
+def test_client_uses_axonapi_scheme_for_api_keys():
+    c = AxonOpsClient(api_url="http://localhost:9090", token="key123", token_type="AxonApi")
+    assert c.session.headers["Authorization"] == "AxonApi key123"
+
+
+def test_config_token_type_defaults_to_bearer_and_is_validated():
+    import pydantic
+    from kafka_analyzer.config import AxonOpsConfig
+
+    assert AxonOpsConfig(token="t").token_type == "Bearer"
+    assert AxonOpsConfig(token="t", token_type="AxonApi").token_type == "AxonApi"
+    with pytest.raises(pydantic.ValidationError):
+        AxonOpsConfig(token="t", token_type="Basic")
+
+
 def test_client_strips_trailing_slash():
     c = AxonOpsClient(api_url="http://example.com/", token="x")
     assert c.api_url == "http://example.com"
